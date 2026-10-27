@@ -35,6 +35,9 @@ pattern = '<version>(?P<version>[^<]+)</version>'
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "addon/FreeCADMCP/package.xml" }]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/freecad_mcp", "addon/FreeCADMCP/freecad_mcp_core"]
+
 [tool.hatch.build.targets.sdist]
 exclude = ["assets", "results"]
 

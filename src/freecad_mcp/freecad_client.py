@@ -111,6 +111,18 @@ class FreeCADConnection:
                 setattr(self, attr, value)
         return addon_version_warning(status)
 
+    def assembly_capabilities(self) -> dict[str, Any]:
+        return self._call("assembly_capabilities")
+
+    def assembly_submit(self, operation: str, arguments: dict, request_id: str) -> dict:
+        return self._call("assembly_submit", operation, arguments, request_id)
+
+    def assembly_job_status(self, job_id: str = "", include_result: bool = True) -> dict:
+        return self._call("assembly_job_status", job_id, include_result)
+
+    def assembly_cancel(self, job_id: str) -> dict:
+        return self._call("assembly_cancel", job_id)
+
     def create_document(self, name: str) -> dict[str, Any]:
         return self._call("create_document", name)
 

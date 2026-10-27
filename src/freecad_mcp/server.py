@@ -75,8 +75,9 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
 mcp = FastMCP(
     "FreeCADMCP",
-    instructions=("FreeCAD with verified mounting workflows. For assembly: inspect_part -> "
-                  "define_interface -> plan_alignment -> apply_alignment -> check_assembly -> inspect_region. "
+    instructions=("FreeCAD with verified mounting workflows. Check get_assembly_capabilities first. For assembly: inspect_part -> "
+                  "define_interface -> plan_alignment -> preview_alignment -> apply_alignment -> check_assembly -> inspect_region. "
+                  "If a tool returns job_id, poll get_assembly_job instead of submitting a duplicate operation. "
                   "Use explicit hole correspondence; do not infer correctness from execute_code success or screenshots. "
                   "Report numeric verification and collision scope; never claim entire assembly checked from two parts."),
     lifespan=server_lifespan,
@@ -137,6 +138,7 @@ def get_freecad_connection() -> FreeCADConnection:
         state.version_notice = connection.check_addon_version()
         if state.version_notice:
             logger.warning(state.version_notice)
+        connection.allow_legacy_assembly = state.allow_legacy_addon
         state.freecad_connection = connection
     return state.freecad_connection
 
@@ -889,6 +891,104 @@ def check_assembly(ctx: Context, plan_id: str) -> ToolResponse:
     return call(get_freecad_connection(), "check_assembly", dict(plan_id=plan_id))
 
 
+@tool
+def get_assembly_capabilities(ctx: Context) -> ToolResponse:
+    """Check native addon protocol and supported assembly operations before working."""
+    from .assembly.bridge import capabilities
+    from .responses import json_response, error_response
+    try:
+        return json_response(capabilities(get_freecad_connection()))
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@tool
+def start_assembly_operation(ctx: Context, operation: str, arguments: dict[str, Any], request_id: str) -> ToolResponse:
+    """Submit a native CAD job immediately; keep request_id to retry the SAME request safely.
+
+    Allowed operations are reported by get_assembly_capabilities. No arbitrary Python.
+    Returns job_id; poll get_assembly_job. Reusing request_id with different args fails.
+    Idempotency lasts while the job is retained in addon history; jobs survive MCP restart,
+    but not FreeCAD exit. Use this for long operations instead of waiting on a tool call.
+    """
+    from .assembly.bridge import capabilities
+    from .responses import json_response, error_response
+    try:
+        c = get_freecad_connection()
+        caps = capabilities(c)
+        if operation not in caps["operations"]:
+            return error_response("Unsupported native operation")
+        result = c.assembly_submit(operation, arguments, request_id)
+        return json_response(result) if result.get("success") else error_response(result.get("error", "Submit failed"))
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@tool
+def get_assembly_job(ctx: Context, job_id: str, include_result: bool = True) -> ToolResponse:
+    """Poll without waiting for the GUI. Includes durable outcome and native PNGs when done.
+
+    outcome_unknown means the GUI exceeded its dispatch budget and may still finish:
+    continue polling; do not duplicate the mutation. Results last until history eviction
+    (32 completed jobs) or FreeCAD exit.
+    """
+    from .assembly.bridge import get_job
+    return get_job(get_freecad_connection(), job_id, include_result)
+
+
+@tool
+def cancel_assembly_job(ctx: Context, job_id: str) -> ToolResponse:
+    """Cancel queued jobs or request safe-point cancellation with rollback for running mutations.
+
+    Running OCCT calls cannot be interrupted. accepted=true is a request, not proof
+    of cancellation: poll for terminal state. Once committing begins cancellation is refused.
+    """
+    from .responses import json_response, error_response
+    try:
+        result = get_freecad_connection().assembly_cancel(job_id)
+        return json_response(result) if result.get("success") else error_response(result.get("error", "Cancel failed"))
+    except Exception as exc:
+        return error_response(str(exc))
+
+
+@tool
+def preview_alignment(ctx: Context, plan_id: str, size: int = 1024) -> ToolResponse:
+    """See the proposed placement without changing the document: cyan ghost + green/orange axes.
+
+    Produces native PNGs and removes all temporary scene-graph overlays afterwards.
+    The plan must be fresh and unapplied. Does not add document objects or move parts.
+    """
+    from .assembly.bridge import call
+    from .responses import error_response
+    if state.only_text_feedback:
+        return error_response("Preview requires image feedback")
+    return call(get_freecad_connection(), "preview_alignment", dict(plan_id=plan_id, size=size))
+
+
+@tool
+def create_assembly(ctx: Context, doc_name: str, parts: list[str], name: str = "Assembly") -> ToolResponse:
+    """Create a native FreeCAD Assembly containing specified ROOT parts, preserving world poses.
+
+    Changes document organization in one transaction. Refuses parts already inside containers.
+    Creates the native joint group. Does not save files.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "create_assembly", dict(doc_name=doc_name, parts=parts, name=name))
+
+
+@tool
+def create_fixed_joint(ctx: Context, plan_id: str, assembly_name: str, joint_name: str = "MountingJoint") -> ToolResponse:
+    """Persist verified mounting pose as a native Fixed Joint, grounding the fixed part.
+
+    Requires an applied, still-valid plan and both owners directly inside an existing
+    native Assembly with no prior joints. Runs solver then numeric/collision checks;
+    rolls back if they fail. Native joint survives saving/reopening; connectors preserve
+    relative pose, detached from face topology. This is not a general constraint-network editor.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "create_fixed_joint", dict(plan_id=plan_id, assembly_name=assembly_name, joint_name=joint_name))
+
+
 def _validate_host(value: str) -> str:
     """Validate that *value* is a valid IP address or hostname.
 
@@ -912,6 +1012,7 @@ def main():
     import os
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--allow-legacy-addon", action="store_true", help="Explicit compatibility mode using execute_code for old addons")
     parser.add_argument("--only-text-feedback", action="store_true", help="Only return text feedback")
     parser.add_argument("--host", type=_validate_host, default="localhost", help="Host address of the FreeCAD RPC server to connect to (default: localhost)")
     parser.add_argument(
@@ -924,6 +1025,7 @@ def main():
     )
     parser.add_argument("--freecadcmd", default=None, help="Command that starts headless FreeCAD for execute_code_headless, e.g. 'flatpak run --command=freecadcmd org.freecad.FreeCAD' (default: auto-detect PATH, then Flatpak)")
     args = parser.parse_args()
+    state.allow_legacy_addon = args.allow_legacy_addon
     state.only_text_feedback = args.only_text_feedback
     state.rpc_host = args.host
     state.auth_token = args.auth_token or os.environ.get("FREECAD_MCP_TOKEN") or None

@@ -39,11 +39,20 @@ def test_body_tip_visible_during_capture_and_view_restored(monkeypatch, capture_
     dispatch = ModuleType('rpc_server.gui_dispatch')
     dispatch._flush_gui_events = lambda **kwargs: None
     monkeypatch.setitem(sys.modules, 'rpc_server.gui_dispatch', dispatch)
-    source = Path(__file__).parents[1] / 'src/freecad_mcp/assembly/runtime.py'
-    spec = importlib.util.spec_from_file_location('freecad_mcp.assembly._views_test', source)
+    source = Path(__file__).parents[1] / 'addon/FreeCADMCP/freecad_mcp_core/runtime.py'
+    spec = importlib.util.spec_from_file_location('freecad_mcp_core._views_test', source)
     runtime = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runtime)
     runtime.fingerprint = lambda o: 'unchanged'
+    # Verified Placement must not silently violate an existing native constraint network.
+    group = SimpleNamespace(Group=[object()], isDerivedFrom=lambda name: name == 'Assembly::JointGroup')
+    assembly = SimpleNamespace(Group=[group], isDerivedFrom=lambda name: name == 'Assembly::AssemblyObject',
+                               getParentGeoFeatureGroup=lambda: None)
+    constrained = SimpleNamespace(getParentGeoFeatureGroup=lambda: assembly)
+    with pytest.raises(ValueError, match='existing joints'):
+        runtime.require_unconstrained_owner(constrained)
+    group.Group = []
+    runtime.require_unconstrained_owner(constrained)
     if capture_fails:
         with pytest.raises(RuntimeError, match='capture failed'):
             runtime.inspect_region('D', ['Body'], ['Top'], 512)

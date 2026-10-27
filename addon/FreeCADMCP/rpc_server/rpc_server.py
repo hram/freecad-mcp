@@ -50,6 +50,8 @@ _EXEC_NAMESPACE: dict[str, Any] = {
     "Gui": FreeCADGui,
 }
 _async_execution = threading.local()
+_assembly_service = None
+_assembly_service_lock = threading.Lock()
 
 # Background jobs started by execute_code_async, newest last. Errors raised off
 # the GUI thread used to reach only the Report View; the registry lets the
@@ -116,6 +118,18 @@ def _query_on_gui(task: Callable[[], Any], operation: str) -> Any:
     raise Fault(1, f"{code}: {error['error']}")
 
 
+def _get_assembly_service() -> Any:
+    global _assembly_service
+    with _assembly_service_lock:
+        if _assembly_service is None:
+            from freecad_mcp_core.jobs import AssemblyService
+            def run(operation: str, arguments: dict, checkpoint: Callable[[str, float], None]) -> dict:
+                from freecad_mcp_core.runtime import dispatch
+                return dispatch(operation, arguments, checkpoint=checkpoint)
+            _assembly_service = AssemblyService(dispatch_to_gui, run)
+        return _assembly_service
+
+
 class FreeCADRPC:
     """RPC server for FreeCAD"""
     TIMEOUT = 60               # generous wait for GUI thread to become free
@@ -124,6 +138,25 @@ class FreeCADRPC:
     # cancelled once started, so an unbounded wait would hide a wedged GUI
     # thread from the caller indefinitely.
     MAX_EXECUTE_CODE_TIMEOUT = 1800
+
+    def assembly_capabilities(self) -> dict[str, Any]:
+        from freecad_mcp_core import ASSEMBLY_PROTOCOL
+        return {"success": True, "assembly_protocol": ASSEMBLY_PROTOCOL,
+                "operations": ["inspect_part", "define_interface", "plan_alignment", "apply_alignment",
+                               "check_assembly", "inspect_region", "preview_alignment", "create_assembly", "create_fixed_joint"],
+                "jobs": True, "idempotent_requests": True, "cooperative_cancellation": True,
+                "document_revisions": True, "addon_version": ADDON_VERSION}
+
+    def assembly_submit(self, operation: str, arguments: dict, request_id: str) -> dict:
+        if operation not in self.assembly_capabilities()["operations"]:
+            return {"success": False, "error": "Unsupported assembly operation"}
+        return _get_assembly_service().submit(operation, arguments, request_id)
+
+    def assembly_job_status(self, job_id: str = "", include_result: bool = True) -> dict:
+        return _get_assembly_service().status(job_id, include_result)
+
+    def assembly_cancel(self, job_id: str) -> dict:
+        return _get_assembly_service().cancel(job_id)
 
     def ping(self):
         return True
@@ -139,6 +172,7 @@ class FreeCADRPC:
             "async_jobs_running": running,
             "addon_version": ADDON_VERSION,
             "protocol_version": PROTOCOL_VERSION,
+            "assembly_protocol": 1,
             "execute_code_timeout": self.EXECUTE_CODE_TIMEOUT,
             "max_execute_code_timeout": self.MAX_EXECUTE_CODE_TIMEOUT,
         }
