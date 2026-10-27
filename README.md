@@ -1,82 +1,119 @@
-# FreeCAD MCP
+# FreeCAD MCP for meta-agent
 
-<p align="left">
- <a href="https://www.star-history.com/neka-nat/freecad-mcp">
-  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=neka-nat/freecad-mcp&type=trending&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/badge?repo=neka-nat/freecad-mcp&type=trending" />
-   <img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=neka-nat/freecad-mcp&type=trending" />
-  </picture>
- </a>
-</p>
+FreeCAD MCP с измеряемым результатом сборки: агент получает геометрию крепления,
+планирует перемещение, проверяет результат и видит несколько ракурсов.
 
-[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/neka-nat-freecad-mcp-badge.png)](https://mseep.ai/app/neka-nat-freecad-mcp)
+Основан на [neka-nat/freecad-mcp](https://github.com/neka-nat/freecad-mcp)
+(MIT). Сохранены все 17 исходных инструментов, аддон и история upstream.
+Добавлены 6 инструментов для сборки.
 
-Control FreeCAD from Claude Desktop and other MCP clients. Create and edit models,
-run Python scripts, inspect documents, and run FEM analyses.
+![Проверенная сборка двух деталей в live smoke](assets/verified-mounting.png)
+ Исходная документация:
+[UPSTREAM_README](UPSTREAM_README.md).
 
-## Demo
+## Быстрый запуск
 
-Design a flange:
-
-![Designing a flange in FreeCAD](./assets/freecad_mcp4.gif)
-
-See [more demos and examples](docs/examples.md) for a toy car, modelling from a
-2D drawing, and agent integrations.
-
-## Quick start
-
-You need FreeCAD and [uv / uvx](https://docs.astral.sh/uv/guides/tools/).
-FreeCAD MCP has two components: an addon running inside FreeCAD and an MCP server
-launched by your client.
-
-### 1. Install and start the FreeCAD addon
+Требуются Python 3.12+, uv и открытый FreeCAD с запущенным MCP RPC на порту 9875.
 
 ```bash
-git clone https://github.com/neka-nat/freecad-mcp.git
-cd freecad-mcp
+uv sync
+uv run freecad-mcp --host 127.0.0.1
 ```
 
-Copy `addon/FreeCADMCP` into your [FreeCAD addon directory](docs/installation.md#addon-directory),
-then restart FreeCAD. Select the **MCP Addon** workbench and click
-**Start RPC Server** in the **FreeCAD MCP** toolbar.
+Если аддон уже установлен, заменять его и перезапускать FreeCAD для новых
+инструментов не нужно. Сервер передаёт свой пакет геометрических операций через
+существующий `execute_code`; всё обращение к документу выполняется в GUI-потоке.
+Общий файловый путь между MCP и FreeCAD не требуется.
 
-See the [installation guide](docs/installation.md) for platform-specific commands
-and screenshots.
+Для новой установки аддона см. [исходную инструкцию](UPSTREAM_README.md).
+При включённой аутентификации задайте `FREECAD_MCP_TOKEN` в окружении MCP.
 
-### 2. Connect Claude Desktop
+## Подключение к meta-agent
 
-Add the following entry to `claude_desktop_config.json`:
+Добавьте custom MCP в нужное пространство, сохранив другие серверы:
 
 ```json
 {
-  "mcpServers": {
-    "freecad": {
-      "command": "uvx",
-      "args": ["freecad-mcp"]
-    }
-  }
+  "id": "freecad",
+  "command": "/absolute/path/freecad-mcp/.venv/bin/freecad-mcp",
+  "args": ["--host", "127.0.0.1"],
+  "required": true,
+  "toolTimeoutSec": 240,
+  "roles": ["meta", "project"]
 }
 ```
 
-Restart Claude Desktop to load the configuration, keep FreeCAD open with its RPC
-server running, and ask Claude to create a model. Connections use `localhost` by
-default.
+`toolTimeoutSec` поддерживается обновлённым meta-agent и попадает в Codex
+`tool_timeout_sec`. После обновления кода meta-agent перезапустите его процесс;
+после изменения MCP создайте новую агентную сессию. Для других MCP-клиентов
+настройте таймаут вызова отдельно. При сетевом таймауте состояние операции
+неизвестно: дождитесь освобождения GUI и проверьте `check_assembly`, прежде чем
+снова перемещать деталь. Таймаут RPC не останавливает выполняющуюся CAD-операцию.
 
-## Documentation
+## Рабочий цикл
 
-| Guide | Contents |
-| --- | --- |
-| [Installation](docs/installation.md) | Addon directories, setup screenshots, running from source |
-| [Configuration](docs/configuration.md) | Auto-start, text feedback, remote connections |
-| [Tools](docs/tools.md) | Available tools, screenshots, FEM analysis |
-| [Code execution](docs/execution.md) | GUI execution, background jobs, headless scripts, timeout troubleshooting |
-| [Demos and examples](docs/examples.md) | Design demos, FEM example, ADK and LangChain integrations |
+1. `inspect_part(doc_name, part)` — валидность, габариты, плоские грани,
+   цилиндры, оси и радиусы в **мировых координатах**, в миллиметрах.
+   Большие детали выдаются страницами по 100 граней каждого типа; следуйте полям next_*_offset.
+2. `define_interface(doc_name, part, plane_face, hole_faces)` — явный интерфейс:
+   контактная плоскость и не менее двух отверстий в заданном порядке.
+3. `plan_alignment(fixed_interface, moving_interface, obstacles=[...])` —
+   план без изменения документа. Порядок отверстий определяет соответствие;
+   симметрию и назначение крепления агент должен разрешить явно.
+4. `apply_alignment(plan_id)` — транзакция, перемещение, recompute, измерения.
+   Ошибка или нарушение допуска вызывает откат. Файл не сохраняется.
+5. `check_assembly(plan_id)` — повторная независимая проверка текущего положения:
+   ошибки отверстий, углы осей, зазор и объёмы пересечений.
+6. `inspect_region(doc_name, parts=[...])` — PNG изометрии, сверху и справа
+   одним ответом с отпечатками геометрии. Камера и видимость восстанавливаются.
 
-## Contributors
+Например, две пластинки с двумя отверстиями:
 
-<a href="https://github.com/neka-nat/freecad-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=neka-nat/freecad-mcp" />
-</a>
+```text
+fixed = define_interface("Fixture", "Base", "Face6", ["Face7", "Face8"])
+moving = define_interface("Fixture", "Bracket", "Face5", ["Face7", "Face8"])
+plan = plan_alignment(fixed.interface_id, moving.interface_id,
+                      gap_mm=0, tolerance_mm=0.01, obstacles=["Motor"])
+apply_alignment(plan.plan_id)
+check_assembly(plan.plan_id)
+inspect_region("Fixture", ["Base", "Bracket", "Motor"])
+```
 
-Made with [contrib.rocks](https://contrib.rocks).
+Имена граней в примере условные: их нужно получить через `inspect_part`.
+Противоположные нормали плоскостей задают соприкосновение, положительный зазор
+откладывается наружу фиксированной детали. Радиусы могут различаться для
+зазорного крепления: совместимость крепежа по диаметрам остаётся отдельной задачей.
+
+## Границы проверки
+
+- Это жёсткое позиционирование через Placement, без постоянных Assembly constraints.
+- Проверены `Part::Feature`, детали во вложенном `App::Part` и произвольные повороты.
+  Для PartDesign выбирайте сам Body как `part` (проверено live smoke). Применение к `App::Link` и
+  перемещение контейнера `App::Part` пока запрещены.
+- Поддерживаются полные цилиндрические внутренние стенки, открывающиеся на
+  выбранную плоскость перпендикулярно ей. Частичные цилиндры, пазы и составные
+  стенки требуют отдельного расширения. Кандидат цилиндра не равен доказанному
+  сквозному отверстию.
+- Коллизии проверяются **только** между перемещаемой геометрией, фиксированной
+  деталью и явно перечисленными `obstacles`. Ответ всегда содержит область
+  проверки и `whole_assembly_checked: false`.
+- Интерфейсы привязаны к отпечатку геометрии и положения. После изменений нужно
+  определить их заново. Идентификаторы живут в FreeCAD: истекают при перезапуске,
+  обновлении runtime или вытеснении из кэша (256 записей каждого типа).
+- Успешный скрипт и красивый скриншот не доказывают правильность сборки.
+  Агент должен сообщить численный результат и область проверки.
+
+## Проверка разработки
+
+```bash
+uv run pytest -q
+uv run python -m compileall -q src addon
+uv build
+# Отдельный live smoke с открытым FreeCAD / RPC:
+uv run python scripts/smoke_mounting.py
+uv run python scripts/smoke_mounting.py --body
+```
+
+Live smoke создаёт и закрывает только одноразовый документ: два крепления,
+поворот детали, вложенное размещение, препятствие для проверки отката, контроль
+повторного применения и устаревших интерфейсов, три PNG. Рабочие детали не меняет.

@@ -1,7 +1,7 @@
 [project]
 name = "freecad-mcp"
 dynamic = ["version"]
-description = "Add your description here"
+description = "FreeCAD MCP for meta-agent with verified mounting alignment and multi-view inspection"
 readme = "README.md"
 authors = [
     { name = "neka-nat", email = "nekanat.stock@gmail.com" }

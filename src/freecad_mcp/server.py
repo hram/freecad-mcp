@@ -75,7 +75,10 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
 mcp = FastMCP(
     "FreeCADMCP",
-    instructions="FreeCAD integration through the Model Context Protocol",
+    instructions=("FreeCAD with verified mounting workflows. For assembly: inspect_part -> "
+                  "define_interface -> plan_alignment -> apply_alignment -> check_assembly -> inspect_region. "
+                  "Use explicit hole correspondence; do not infer correctness from execute_code success or screenshots. "
+                  "Report numeric verification and collision scope; never claim entire assembly checked from two parts."),
     lifespan=server_lifespan,
 )
 
@@ -797,6 +800,93 @@ def run_fem_analysis(
 @mcp.prompt()
 def asset_creation_strategy() -> str:
     return ASSET_CREATION_STRATEGY
+
+
+@tool
+def inspect_part(ctx: Context, doc_name: str, part: str, feature_limit: int = 100,
+                 plane_offset: int = 0, cylinder_offset: int = 0) -> ToolResponse:
+    """Inspect world-space valid geometry, planar faces and cylindrical hole candidates.
+
+    Start here before assembly work. Face names are temporary references; define_interface
+    binds them to geometry fingerprints. Does not move parts or change the camera.
+    Faces are paginated (1..500 per type); follow next_plane_offset/next_cylinder_offset
+    when present. feature_counts gives full totals.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "inspect_part", dict(doc_name=doc_name, part=part,
+        feature_limit=feature_limit, plane_offset=plane_offset, cylinder_offset=cylinder_offset))
+
+
+@tool
+def inspect_region(ctx: Context, doc_name: str, parts: list[str],
+                   views: list[str] | None = None, size: int = 1024) -> ToolResponse:
+    """See 1..6 focused views of selected parts, with world-geometry fingerprints.
+
+    Default Isometric/Top/Right. Produces native MCP PNG images, temporarily hides other
+    objects and restores camera/visibility. Requested document must be active in 3D.
+    size is square pixels (256..1536). Visual evidence supplements check_assembly.
+    """
+    from .assembly.bridge import call
+    if state.only_text_feedback:
+        from .responses import error_response
+        return error_response("inspect_region needs image feedback; restart without --only-text-feedback")
+    return call(get_freecad_connection(), "inspect_region", dict(doc_name=doc_name, parts=parts, views=views, size=size))
+
+
+@tool
+def define_interface(ctx: Context, doc_name: str, part: str, plane_face: str,
+                     hole_faces: list[str], owner: str | None = None) -> ToolResponse:
+    """Define a mounting interface: planar mating face and >=2 ordered full inner cylinders.
+
+    Hole order determines correspondence, including symmetric patterns. Cylinders must
+    open onto the plane and be perpendicular to it. owner defaults to part; for a
+    feature inside a PartDesign Body, supply the Body name. No document changes.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "define_interface", dict(
+        doc_name=doc_name, part=part, plane_face=plane_face, hole_faces=hole_faces, owner=owner))
+
+
+@tool
+def plan_alignment(ctx: Context, fixed_interface: str, moving_interface: str,
+                   gap_mm: float = 0, tolerance_mm: float = 0.01,
+                   angular_tolerance_deg: float = 0.05, collision_tolerance_mm3: float = 0.001,
+                   obstacles: list[str] | None = None) -> ToolResponse:
+    """Plan rigid placement matching ordered holes and opposing mounting faces. No mutation.
+
+    Positive gap follows the fixed face outward normal. Checks all hole matches, refuses
+    stale geometry and degenerate patterns. Collision scope during apply is the fixed
+    part plus explicitly named obstacles; include nearby parts. No correspondence guessing.
+    Review this plan, then apply_alignment. Handles expire after FreeCAD restart/code update.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "plan_alignment", dict(
+        fixed_interface=fixed_interface, moving_interface=moving_interface, gap_mm=gap_mm,
+        tolerance_mm=tolerance_mm, angular_tolerance_deg=angular_tolerance_deg,
+        collision_tolerance_mm3=collision_tolerance_mm3, obstacles=obstacles))
+
+
+@tool
+def apply_alignment(ctx: Context, plan_id: str) -> ToolResponse:
+    """Apply a fresh plan in one FreeCAD transaction. Refuse reused/stale plans.
+
+    Recompute and measure actual hole errors, axes, mating gap and scoped intersections.
+    Roll back placement if any check fails. Does not save files. Moves Part::Feature or
+    PartDesign Body; App::Link and App::Part container application are unsupported.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "apply_alignment", dict(plan_id=plan_id))
+
+
+@tool
+def check_assembly(ctx: Context, plan_id: str) -> ToolResponse:
+    """Measure current geometry against a plan, without moving it; reports passed=false on failure.
+
+    This checks only declared interface geometry and collision scope, not every assembly
+    component, topology intent, mechanical strength, or persistent assembly constraints.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "check_assembly", dict(plan_id=plan_id))
 
 
 def _validate_host(value: str) -> str:
