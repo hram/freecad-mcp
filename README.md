@@ -6,7 +6,7 @@ Fork [neka-nat/freecad-mcp](https://github.com/neka-nat/freecad-mcp) (MIT) дл�
 > **Upstream позволяет агенту сделать что-то в FreeCAD. Этот fork позволяет агенту
 > доказать, что деталь встала правильно:** числами, а не фразой «скрипт выполнен».
 
-![Проверенная сборка двух деталей в live smoke](assets/verified-mounting.png)
+![Цикл проверяемой сборки: исходное положение, предпросмотр, применение с замером](assets/verified-mounting-cycle.gif)
 
 ## В чём разница
 
@@ -37,13 +37,16 @@ inspect_region(...)             # изометрия + сверху + справ
 
 ```text
 passed: true
-max_hole_error_mm: 0.003        hole_axis_angles_deg: [0.0, 0.0]
-gap_mm: 0.0                     opposing_faces_error_deg: 0.0
-collisions: [{part: "Motor", overlap_mm3: 0.0}]
-collision_scope: ["Base", "Motor"]     whole_assembly_checked: false
+max_hole_error_mm: 6.2e-14      hole_axis_angles_deg: [0.0, 0.0]
+gap_mm: 3.6e-14                 opposing_faces_error_deg: 0.0
+collisions: [{part: "Base", overlap_mm3: 0.0}]
+collision_scope: ["Base"]       whole_assembly_checked: false
 ```
 
-Значения выше — иллюстрация формата ответа, не вывод конкретного запуска.
+Это вывод реального запуска (FreeCAD 1.1.4, аддон 0.2.1): два бруска 40×24×6 мм с двумя
+отверстиями, кронштейн изначально смещён и повёрнут. Значения порядка 1e-14 мм — шум
+вычислений с плавающей точкой, то есть отверстия совпали точно. Анимация выше снята на
+этой же сцене.
 
 ### Сравнение
 
