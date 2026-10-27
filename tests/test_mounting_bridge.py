@@ -49,8 +49,9 @@ def test_views_are_native_images_not_base64_text():
     c = Connection(reply({'success': True, 'result': {'document': 'A', 'views': [{'view': 'Top', 'png': 'abc'}]}}))
     response = format_result({'success': True, 'result': {'document': 'A', 'views': [{'view': 'Top', 'png': 'abc'}]}}, 'inspect_region')
     assert [r.type for r in response] == ['text', 'text', 'image']
-    assert response[-1].mimeType == 'image/png'
-    assert response[-1].data == 'abc'
+    wire_image = response[-1].model_dump(by_alias=True)
+    assert wire_image['mimeType'] == 'image/png'
+    assert wire_image['data'] == 'abc'
     assert 'abc' not in response[0].text
 
 
