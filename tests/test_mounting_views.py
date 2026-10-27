@@ -1,4 +1,4 @@
-"""Regression: selecting a Body must not hide its rendering Tip."""
+"""Regressions: a selected Body keeps its rendering Tip; captures are not taken mid camera animation."""
 import importlib.util
 import sys
 from pathlib import Path
@@ -23,11 +23,15 @@ def test_body_tip_visible_during_capture_and_view_restored(monkeypatch, capture_
     doc = SimpleNamespace(Name='D', Objects=objects, getObject=lambda name: next(o for o in objects if o.Name == name))
     app = ModuleType('FreeCAD')
     app.ActiveDocument, app.getDocument = doc, lambda name: doc
+    prefs = {'UseNavigationAnimations': True}
+    app.ParamGet = lambda path: SimpleNamespace(
+        GetBool=lambda key: prefs[key], SetBool=lambda key, value: prefs.__setitem__(key, value))
     monkeypatch.setitem(sys.modules, 'FreeCAD', app)
     monkeypatch.setitem(sys.modules, 'Part', ModuleType('Part'))
-    seen, restored = [], []
+    seen, restored, animated = [], [], []
     def save(path, *args):
         seen.append([o.Name for o in objects if o.Visibility])
+        animated.append(prefs['UseNavigationAnimations'])
         if capture_fails:
             raise RuntimeError('capture failed')
         Path(path).write_bytes(b'\x89PNG\r\n\x1a\n')
@@ -62,3 +66,5 @@ def test_body_tip_visible_during_capture_and_view_restored(monkeypatch, capture_
     assert seen == [['Body', 'Tip']]
     assert all(o.Visibility for o in objects)
     assert restored == ['original-camera']
+    assert animated == [False]
+    assert prefs['UseNavigationAnimations'] is True

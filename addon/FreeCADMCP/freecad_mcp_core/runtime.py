@@ -8,6 +8,7 @@ import json
 import math
 import uuid
 from collections import OrderedDict
+from contextlib import contextmanager
 from typing import Any
 
 import FreeCAD as App
@@ -372,6 +373,18 @@ def check_assembly(plan_id: str) -> dict:
     return {"plan_id": plan_id, "status": plan["status"], **measurements(plan)}
 
 
+@contextmanager
+def instant_view_changes():
+    # Standard views are animated by default; a frame captured mid-animation has a skewed camera.
+    params = App.ParamGet("User parameter:BaseApp/Preferences/View")
+    previous = params.GetBool("UseNavigationAnimations")
+    params.SetBool("UseNavigationAnimations", False)
+    try:
+        yield
+    finally:
+        params.SetBool("UseNavigationAnimations", previous)
+
+
 def inspect_region(doc_name: str, parts: list[str], views: list[str] | None = None, size: int = 1024,
                    preview_plan: str | None = None) -> dict:
     """Coherent multi-view image set; camera and visibility restored even on failure."""
@@ -416,26 +429,27 @@ def inspect_region(doc_name: str, parts: list[str], views: list[str] | None = No
             view.getSceneGraph().addChild(overlay)
         for o, _ in visibility:
             o.Visibility = o in keep
-        for index, name in enumerate(views):
-            checkpoint("rendering:" + name, (index+1)/(len(views)+1))
-            getattr(view, choices[name])()
-            view.fitAll()
-            _flush_gui_events(delay_ms=0)
-            view.redraw()
-            fd, path = tempfile.mkstemp(suffix=".png")
-            os.close(fd)
-            try:
+        with instant_view_changes():
+            for index, name in enumerate(views):
+                checkpoint("rendering:" + name, (index+1)/(len(views)+1))
+                getattr(view, choices[name])()
+                view.fitAll()
+                _flush_gui_events(delay_ms=0)
+                view.redraw()
+                fd, path = tempfile.mkstemp(suffix=".png")
+                os.close(fd)
                 try:
-                    view.saveImage(path, size, size, "Current", "Framebuffer")
-                except TypeError:
-                    view.saveImage(path, size, size, "Current")
-                with open(path, "rb") as f:
-                    data = f.read()
-                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-                    raise ValueError("FreeCAD failed to produce a PNG")
-                images.append({"view": name, "png": base64.b64encode(data).decode()})
-            finally:
-                os.unlink(path)
+                    try:
+                        view.saveImage(path, size, size, "Current", "Framebuffer")
+                    except TypeError:
+                        view.saveImage(path, size, size, "Current")
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                        raise ValueError("FreeCAD failed to produce a PNG")
+                    images.append({"view": name, "png": base64.b64encode(data).decode()})
+                finally:
+                    os.unlink(path)
     finally:
         if overlay is not None:
             view.getSceneGraph().removeChild(overlay)
