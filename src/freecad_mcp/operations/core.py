@@ -286,8 +286,15 @@ def get_parts_list_operation(freecad: FreeCADConnection) -> ToolResponse:
     return text_response("No parts found in the parts library. You must add parts_library addon.")
 
 
-def list_documents_operation(freecad: FreeCADConnection) -> ToolResponse:
-    return json_response(freecad.list_documents())
+def list_documents_operation(freecad: FreeCADConnection, include_status: bool = False) -> ToolResponse:
+    return json_response(freecad.list_documents(True) if include_status else freecad.list_documents())
+
+
+def get_document_status_operation(freecad: FreeCADConnection, doc_name: str = "") -> ToolResponse:
+    try:
+        return json_response(freecad.get_document_status(doc_name))
+    except Exception as exc:
+        return error_response("Failed to read document save status: " + str(exc))
 
 
 def get_rpc_status_operation(freecad: FreeCADConnection) -> ToolResponse:

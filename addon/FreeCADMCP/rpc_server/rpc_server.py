@@ -173,6 +173,7 @@ class FreeCADRPC:
             "addon_version": ADDON_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "assembly_protocol": 1,
+            "document_status": True,
             "execute_code_timeout": self.EXECUTE_CODE_TIMEOUT,
             "max_execute_code_timeout": self.MAX_EXECUTE_CODE_TIMEOUT,
         }
@@ -476,7 +477,15 @@ class FreeCADRPC:
             return {"success": True, "message": "Part inserted from library."}
         return _err(res)
 
-    def list_documents(self) -> list[str]:
+    def get_document_status(self, doc_name: str = "") -> dict:
+        def query() -> dict:
+            from rpc_server.document_status import document_status
+            return document_status(FreeCAD, FreeCADGui, doc_name)
+        return _query_on_gui(query, "get_document_status")
+
+    def list_documents(self, include_status: bool = False) -> list[str] | dict:
+        if include_status:
+            return self.get_document_status()
         return _query_on_gui(
             lambda: list(FreeCAD.listDocuments().keys()), "list_documents"
         )

@@ -728,13 +728,31 @@ def reload_document(ctx: Context, doc_name: str) -> list[TextContent]:
 
 
 @tool
-def list_documents(ctx: Context) -> list[TextContent]:
+def list_documents(ctx: Context, include_status: bool = False) -> list[TextContent]:
     """Get the list of open documents in FreeCAD.
 
+    With include_status=true, also return labels, file paths, GUI modified flags,
+    needs_save and needs_recompute. Default preserves the list of names.
+
     Returns:
-        A list of document names.
+        A list of document names, or a structured status snapshot.
     """
-    return list_documents_operation(get_freecad_connection())
+    return list_documents_operation(get_freecad_connection(), include_status)
+
+
+@tool
+def get_document_status(ctx: Context, doc_name: str = "") -> ToolResponse:
+    """Read which open documents need saving, without saving or recomputing anything.
+
+    Empty doc_name lists all; otherwise inspect one named document. modified is the
+    GUI dirty flag (same save-state indicator as the UI), saved_once means saved before,
+    needs_recompute is independent. needs_save is true for new/modified/missing-file
+    documents; null means the dirty flag could not be read, never assumed clean.
+    file_path and file_exists identify the associated disk file. App.save()/saveAs()
+    can leave the GUI modified flag set; this reports the actual GUI flag honestly.
+    """
+    from .operations.core import get_document_status_operation
+    return get_document_status_operation(get_freecad_connection(), doc_name)
 
 
 @tool

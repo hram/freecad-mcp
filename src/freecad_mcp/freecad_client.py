@@ -193,8 +193,12 @@ class FreeCADConnection:
     def get_parts_list(self) -> list[str]:
         return self._call("get_parts_list")
 
-    def list_documents(self) -> list[str]:
-        return self._call("list_documents")
+    def list_documents(self, include_status: bool = False) -> list[str] | dict:
+        # No argument on the old path preserves compatibility with old addons.
+        return self._call("list_documents", True) if include_status else self._call("list_documents")
+
+    def get_document_status(self, doc_name: str = "") -> dict:
+        return self._call("get_document_status", doc_name)
 
     def run_fem_analysis(self, doc_name: str, analysis_name: str, timeout: int = 600) -> dict[str, Any]:
         # Both queueing and solving can consume `timeout` seconds each.

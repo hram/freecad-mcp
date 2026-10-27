@@ -563,3 +563,24 @@ def test_scripts_and_job_queries_do_not_scan_unrelated_documents(rpc_module: typ
     job_id = rpc.execute_code_async("value += 1")["job_id"]
     assert wait_for_job(rpc, job_id)["state"] == "done"
     assert rpc.execute_code("print(value)")["message"].endswith("43\n")
+
+
+def test_document_save_status_is_dispatched_to_gui(rpc_module, monkeypatch):
+    from test_document_status import module as status_module
+    monkeypatch.setitem(sys.modules, 'rpc_server.document_status', status_module)
+    doc = rpc_module.FreeCAD.getDocument('Doc')
+    doc.Name, doc.Label, doc.FileName = 'Doc', 'Label', ''
+    doc.isSaved, doc.isTouched = lambda: False, lambda: False
+    monkeypatch.setattr(rpc_module.FreeCAD, 'ActiveDocument', doc, raising=False)
+    monkeypatch.setattr(rpc_module.FreeCADGui, 'getDocument', lambda name: types.SimpleNamespace(Modified=False), raising=False)
+    dispatched=[]
+    dispatch=rpc_module.dispatch_to_gui
+    def recording(task, **kwargs):
+        dispatched.append(kwargs['operation_name'])
+        return dispatch(task, **kwargs)
+    monkeypatch.setattr(rpc_module, 'dispatch_to_gui', recording)
+    rpc=rpc_module.FreeCADRPC()
+    assert rpc.get_document_status()['documents'][0]['needs_save'] is True
+    assert rpc.list_documents(True)['documents'][0]['saved_once'] is False
+    assert rpc.list_documents() == ['Doc']
+    assert dispatched == ['get_document_status','get_document_status','list_documents']
