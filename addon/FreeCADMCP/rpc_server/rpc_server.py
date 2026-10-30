@@ -143,7 +143,8 @@ class FreeCADRPC:
         from freecad_mcp_core import ASSEMBLY_PROTOCOL
         return {"success": True, "assembly_protocol": ASSEMBLY_PROTOCOL,
                 "operations": ["inspect_part", "define_interface", "plan_alignment", "apply_alignment",
-                               "check_assembly", "inspect_region", "preview_alignment", "create_assembly", "create_fixed_joint"],
+                               "check_assembly", "inspect_region", "preview_alignment", "create_assembly", "create_fixed_joint",
+                               "convert_mesh_to_brep"],
                 "jobs": True, "idempotent_requests": True, "cooperative_cancellation": True,
                 "document_revisions": True, "addon_version": ADDON_VERSION}
 

@@ -598,12 +598,280 @@ def create_fixed_joint(plan_id: str, assembly_name: str, joint_name: str = "Moun
             "note": "Native fixed joint preserves relative pose. Connector placements are detached from topology."}
 
 
+def validate_planar_retriangulation(before: list, after: list) -> dict:
+    """Allow edge flips only in planar patches with identical oriented boundaries."""
+    from collections import Counter, defaultdict
+
+    def canonical(triangle):
+        return min(tuple(triangle[i:]+triangle[:i]) for i in range(3))
+
+    old, new = {canonical(list(t)) for t in before}, {canonical(list(t)) for t in after}
+    removed, added = old-new, new-old
+    changed = list(removed | added)
+    if not changed:
+        return {'retriangulated_triangles': 0, 'planar_patches': 0}
+    adjacency = defaultdict(set)
+    for i, tri in enumerate(changed):
+        for a, b in zip(tri, tri[1:]+tri[:1]):
+            adjacency[tuple(sorted((a, b)))].add(i)
+
+    def boundary(triangles):
+        edges = Counter()
+        for tri in triangles:
+            for a, b in zip(tri, tri[1:]+tri[:1]):
+                edges[tuple(sorted((a, b)))] += 1 if a < b else -1
+        return {edge: count for edge, count in edges.items() if count}
+
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+    unseen, patches = set(range(len(changed))), 0
+    while unseen:
+        pending, component = [unseen.pop()], set()
+        while pending:
+            i = pending.pop()
+            component.add(i)
+            tri = changed[i]
+            for a, b in zip(tri, tri[1:]+tri[:1]):
+                neighbours = adjacency[tuple(sorted((a, b)))] & unseen
+                pending.extend(neighbours)
+                unseen.difference_update(neighbours)
+        patch = {changed[i] for i in component}
+        if boundary(patch & removed) != boundary(patch & added):
+            raise ValueError('Degeneracy repair changed a patch boundary or orientation')
+        # Choose a non-degenerate triangle even if a patch contains a collinear facet.
+        normals = [(t[0], cross(tuple(b-a for a,b in zip(t[0], t[1])),
+                               tuple(b-a for a,b in zip(t[0], t[2])))) for t in patch]
+        origin, normal = max(normals, key=lambda pair: sum(x*x for x in pair[1]))
+        length = math.sqrt(sum(x*x for x in normal))
+        if length < 1e-14 or any(abs(sum((p[j]-origin[j])*normal[j] for j in range(3))) > 1e-7*length
+                                 for tri in patch for p in tri):
+            raise ValueError('Degeneracy repair is not a planar retriangulation')
+        patches += 1
+    return {'retriangulated_triangles': len(removed), 'planar_patches': patches}
+
+
+def repair_mesh_roundoff(mesh: Any, displacement_limit: float,
+                         max_volume_change: float) -> tuple[Any, dict]:
+    """Try bounded snapping and planar retriangulation, never filling holes.
+
+    This is an explicit repair, not a waiver of the self-intersection check.
+    Every candidate must pass that check and preserve topology counts.
+    """
+    import Mesh
+
+    limit = min(displacement_limit, 0.001)
+    records = mesh.getSelfIntersections()
+    lengths = [(row[3]-row[2]).Length for row in records]
+    if not lengths or max(lengths) > 2*limit:
+        raise ValueError("Self-intersections exceed bounded roundoff repair; repair mesh explicitly")
+    points, triangles = mesh.Topology
+    points = [tuple(p) for p in points]
+    baseline = abs(mesh.Volume)
+    if baseline <= 1e-12:
+        raise ValueError("Cannot repair zero/cancelling signed-volume mesh")
+    digits = max(0, math.ceil(-math.log10(limit)))
+    for precision in range(digits+2, digits-1, -1):
+        checkpoint("repairing_mesh_roundoff", 0.18)
+        rounded = [tuple(round(x, precision) for x in p) for p in points]
+        # Do not pass (coordinate-tuples, indices): FreeCAD 1.1.4 can
+        # misinterpret that overload and segfault in MeshKernel::AddFacets.
+        # An explicit list of three-point facets is unambiguous.
+        candidate = Mesh.Mesh([tuple(rounded[i] for i in tri) for tri in triangles])
+        cp, ct = candidate.Topology
+        before = [tuple(tuple(cp[i]) for i in tri) for tri in ct]
+        candidate.fixDegenerations(0)
+        cp, ct = candidate.Topology
+        try:
+            retriangulation = validate_planar_retriangulation(before,
+                [tuple(tuple(cp[i]) for i in tri) for tri in ct])
+        except ValueError:
+            continue
+        # Measure actual float32 coordinates, not only the proposed doubles.
+        # Mesh may reindex vertices; construct the original-to-snapped mapping
+        # separately through the native float storage in the new mesh.
+        actual = {tuple(round(x, precision) for x in p): tuple(p)
+                  for p in candidate.Topology[0]}
+        if any(p not in actual for p in rounded):
+            continue
+        movements = [math.dist(p, actual[q]) for p, q in zip(points, rounded)]
+        if (max(movements, default=0) > limit or
+                candidate.CountPoints != mesh.CountPoints or
+                candidate.CountFacets != mesh.CountFacets):
+            continue
+        if (candidate.hasNonManifolds() or not candidate.isSolid() or
+                candidate.hasSelfIntersections()):
+            continue
+        change = 100*abs(abs(candidate.Volume)-baseline)/baseline
+        if change > max_volume_change:
+            continue
+        return candidate, {"operation": "bounded_decimal_grid_snap", "grid_mm": 10**-precision,
+            "displacement_limit_mm": limit, "max_vertex_displacement_mm": max(movements),
+            "changed_vertices": sum(d > 0 for d in movements),
+            "self_intersection_records_before": len(records),
+            "max_intersection_segment_mm": max(lengths),
+            "self_intersections_after": False, "topology_counts_preserved": True,
+            "volume_change_percent": change, **retriangulation}
+    raise ValueError("Self-intersections remain after bounded roundoff repair; no solid created")
+
+
+def convert_mesh_to_brep(doc_name: str, mesh_object: str = "", source_file: str = "",
+                         name: str = "MeshBREP", tolerance_mm: float = 0.01,
+                         repair: bool = False, refine: bool = True,
+                         max_volume_change_percent: float = 0.1,
+                         recognize_surfaces: bool = True, fit_tolerance_mm: float = 0.001,
+                         surface_tolerance_mm: float = 0.05) -> dict:
+    """Sew a copied mesh into validated solids; preserve source and document poses."""
+    import os
+    import Mesh
+    from collections import Counter
+
+    tolerance = g.positive(tolerance_mm, "tolerance_mm")
+    max_change = g.positive(max_volume_change_percent, "max_volume_change_percent", True)
+    fit_tolerance = g.positive(fit_tolerance_mm, "fit_tolerance_mm")
+    surface_tolerance = g.positive(surface_tolerance_mm, "surface_tolerance_mm")
+    if not all(isinstance(value, bool) for value in (repair, refine, recognize_surfaces)):
+        raise ValueError("repair, refine and recognize_surfaces must be booleans")
+    if bool(mesh_object) == bool(source_file):
+        raise ValueError("Supply exactly one of mesh_object or source_file")
+    if not isinstance(name, str) or not name or not name.isascii() or not name.isidentifier():
+        raise ValueError("name must be an ASCII object identifier")
+    doc = App.getDocument(doc_name)
+    if not doc.UndoMode or doc.HasPendingTransaction:
+        raise ValueError("Enable Undo and finish any open transaction before conversion")
+    if doc.getObject(name):
+        raise ValueError("Output object already exists: " + name)
+    world_placement = None
+    if mesh_object:
+        source = obj(doc_name, mesh_object)
+        if not source.isDerivedFrom("Mesh::Feature"):
+            raise ValueError("mesh_object must be a Mesh::Feature")
+        mesh = source.Mesh.copy()
+        # Convert locally before assigning the global BREP placement. Transforming
+        # mesh vertices first rounds them to float32 and can break coplanarity
+        # or lose precision far from the origin.
+        mesh.Placement = App.Placement()
+        world_placement = source.getGlobalPlacement()
+        provenance = {"mesh_object": source.Name}
+    else:
+        if not isinstance(source_file, str) or not os.path.isfile(source_file):
+            raise ValueError("source_file must be an existing STL path on the FreeCAD host")
+        if os.path.splitext(source_file)[1].lower() != ".stl":
+            raise ValueError("Only STL files are accepted")
+        mesh = Mesh.Mesh(source_file)
+        provenance = {"source_file": os.path.abspath(source_file)}
+    if not mesh.CountFacets:
+        raise ValueError("Mesh is empty")
+    checkpoint("inspecting_mesh", 0.1)
+    original_facets, original_volume = mesh.CountFacets, abs(mesh.Volume)
+    original_bounds = [mesh.BoundBox.XMin, mesh.BoundBox.YMin, mesh.BoundBox.ZMin,
+                       mesh.BoundBox.XMax, mesh.BoundBox.YMax, mesh.BoundBox.ZMax]
+    repairs = []
+    if repair:
+        for method in ("removeDuplicatedPoints", "removeDuplicatedFacets", "harmonizeNormals"):
+            before = (mesh.CountPoints, mesh.CountFacets)
+            getattr(mesh, method)()
+            repairs.append({"operation": method, "points_before": before[0],
+                            "facets_before": before[1], "points_after": mesh.CountPoints,
+                            "facets_after": mesh.CountFacets})
+    if mesh.hasNonManifolds():
+        raise ValueError("Mesh has non-manifold edges; no solid created")
+    if not mesh.isSolid():
+        raise ValueError("Mesh is not closed/consistently oriented; holes are not filled automatically")
+    if mesh.hasSelfIntersections():
+        if not repair:
+            raise ValueError("Mesh has self-intersections; no solid created (repair=true enables bounded roundoff repair)")
+        mesh, repair_report = repair_mesh_roundoff(mesh, min(tolerance, fit_tolerance), max_change)
+        repairs.append(repair_report)
+    if original_volume <= 1e-12:
+        raise ValueError("Source mesh has zero or cancelling signed volume; repair orientation explicitly")
+    roundoff_repaired = any(r['operation'] == 'bounded_decimal_grid_snap' for r in repairs)
+    checkpoint("sewing_mesh", 0.25)
+    sewn = Part.Shape()
+    sewn.makeShapeFromMesh(mesh.Topology, tolerance)
+    if not sewn.Shells:
+        raise ValueError("Sewing produced no shells")
+    solids = []
+    for index, shell in enumerate(sewn.Shells):
+        checkpoint("validating_shell:%d" % index, 0.45)
+        if not shell.isClosed():
+            raise ValueError("Sewing produced an open shell; reduce tolerance or repair the mesh")
+        solid = Part.makeSolid(shell)
+        if solid.Volume < 0:
+            solid.reverse()
+        if refine:
+            solid = solid.removeSplitter()
+        if not solid.isValid() or not solid.isClosed() or len(solid.Solids) != 1 or solid.Volume <= 0:
+            raise ValueError("Shell did not produce a valid positive-volume solid")
+        if roundoff_repaired:
+            solid.check(True)  # Extended BOP/self-interference validation; raises on defects.
+        solids.append(solid)
+    # Separate closed components are supported, but nested shells may describe
+    # cavities. Do not silently turn those cavities into additional filled solids.
+    for i, solid in enumerate(solids):
+        for other in solids[:i]:
+            checkpoint("checking_components", 0.6)
+            if solid.common(other).Volume > 1e-9:
+                raise ValueError("Nested/overlapping shells need explicit cavity handling; no solids created")
+    shape = solids[0] if len(solids) == 1 else Part.makeCompound(solids)
+    recognition = {"enabled": False}
+    if recognize_surfaces:
+        from .mesh_planes import restore_planes
+        shape, planar_report = restore_planes(shape, fit_tolerance, checkpoint)
+        from .mesh_surfaces import restore_cylinders
+        shape, recognition = restore_cylinders(shape.removeSplitter(), fit_tolerance, surface_tolerance, checkpoint)
+        recognition['planar_patches'] = planar_report
+    if roundoff_repaired:
+        shape.check(True)
+        repairs[-1]['extended_brep_check_passed'] = True
+    volume_change = 100 * abs(shape.Volume-original_volume)/original_volume
+    bounds = [shape.BoundBox.XMin, shape.BoundBox.YMin, shape.BoundBox.ZMin,
+              shape.BoundBox.XMax, shape.BoundBox.YMax, shape.BoundBox.ZMax]
+    bounds_change = max(abs(a-b) for a, b in zip(bounds, original_bounds))
+    bounds_limit = max(tolerance, surface_tolerance) if recognize_surfaces else tolerance
+    if volume_change > max_change or bounds_change > bounds_limit:
+        raise ValueError("Conversion exceeds volume/bounds tolerance: %.6g%%, %.6g mm" % (volume_change, bounds_change))
+    if world_placement is not None:
+        shape.Placement = world_placement.multiply(shape.Placement)
+        bb = shape.BoundBox
+        bounds = [bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax]
+    report = {"document": doc_name, "source": provenance, "coordinates": "world", "units": "mm",
+              "source_facets": original_facets, "converted_facets": mesh.CountFacets,
+              "tolerance_mm": tolerance, "repairs": repairs, "refined": refine,
+              "valid": shape.isValid(), "closed": all(s.isClosed() for s in solids),
+              "solid_count": len(solids), "face_count": len(shape.Faces),
+              "surface_types": dict(Counter(type(f.Surface).__name__ for f in shape.Faces)),
+              "source_volume_mm3": original_volume, "volume_mm3": shape.Volume,
+              "volume_change_percent": volume_change, "max_volume_change_percent": max_change,
+              "max_bounds_change_mm": bounds_change, "bounds": {"min": bounds[:3], "max": bounds[3:]},
+              "surface_recognition": recognition, "saved": False,
+              "reconstruction_status": recognition.get('faceting_check', {}).get('status', 'not_assessed'),
+              "note": "See restored/skipped, local_cylinders, analytic_seed_completion and faceting_check. Absence of detected chains is not proof for arbitrary freeform geometry. Volume/bounds checks are not a global deviation bound."}
+    checkpoint("creating_brep", 0.8)
+    doc.openTransaction("MCP convert mesh to BREP")
+    try:
+        result = doc.addObject("Part::Feature", name)
+        result.Shape = shape
+        result.addProperty("App::PropertyString", "ConversionReport", "Mesh conversion")
+        result.ConversionReport = json.dumps(report, sort_keys=True)
+        doc.recompute()
+        if not result.Shape.isValid():
+            raise ValueError("Document result is invalid")
+        checkpoint("committing", 0.95)
+        doc.commitTransaction()
+    except Exception:
+        doc.abortTransaction()
+        raise
+    return {**report, "object": result.Name}
+
+
 def dispatch(operation: str, arguments: dict, checkpoint=None) -> dict:
     global _checkpoint_callback
     _checkpoint_callback = checkpoint
     handlers = {"inspect_part": inspect_part, "define_interface": define_interface, "plan_alignment": plan_alignment,
                 "apply_alignment": apply_alignment, "check_assembly": check_assembly, "inspect_region": inspect_region,
-                "preview_alignment": preview_alignment, "create_assembly": create_assembly, "create_fixed_joint": create_fixed_joint}
+                "preview_alignment": preview_alignment, "create_assembly": create_assembly, "create_fixed_joint": create_fixed_joint,
+                "convert_mesh_to_brep": convert_mesh_to_brep}
     try:
         result = handlers[operation](**arguments)
         return {"success": True, "result": result}

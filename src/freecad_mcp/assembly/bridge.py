@@ -17,7 +17,7 @@ MARKER = "__VERIFIED_CAD_RESULT__"
 
 
 def build_script(operation: str, arguments: dict[str, Any]) -> str:
-    sources = {name: files("freecad_mcp_core").joinpath(name + ".py").read_text() for name in ("geometry", "revisions", "runtime")}
+    sources = {name: files("freecad_mcp_core").joinpath(name + ".py").read_text() for name in ("geometry", "revisions", "mesh_surfaces", "mesh_profiles", "mesh_planes", "mesh_local_cylinders", "runtime")}
     digest = hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()[:16]
     package = "_verified_cad_" + digest
     # Use a function scope so existing execute_code users' globals cannot collide.

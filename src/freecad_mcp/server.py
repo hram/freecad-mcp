@@ -1007,6 +1007,45 @@ def create_fixed_joint(ctx: Context, plan_id: str, assembly_name: str, joint_nam
     return call(get_freecad_connection(), "create_fixed_joint", dict(plan_id=plan_id, assembly_name=assembly_name, joint_name=joint_name))
 
 
+@tool
+def convert_mesh_to_brep(ctx: Context, doc_name: str, mesh_object: str = "", source_file: str = "",
+                         name: str = "MeshBREP", tolerance_mm: float = 0.01,
+                         repair: bool = False, refine: bool = True,
+                         max_volume_change_percent: float = 0.1,
+                         recognize_surfaces: bool = True, fit_tolerance_mm: float = 0.001,
+                         surface_tolerance_mm: float = 0.05) -> ToolResponse:
+    """Convert a mesh object OR STL into BREP, recognizing cylinders and extruded arcs.
+
+    source_file is a path on the FreeCAD host. mesh_object must be a Mesh::Feature;
+    its global position is preserved in the root result. Source geometry/visibility
+    is unchanged. Optional conservative repair removes duplicate points/facets and
+    harmonizes normals on a copy; also tries bounded coordinate snapping for
+    micro-intersections (max vertex movement min(tolerance_mm, fit_tolerance_mm,
+    0.001) mm). Never fills holes. Rejects open, non-manifold, still
+    self-intersecting or nested/overlapping shells. recognize_surfaces first
+    merges near-planar patches on common planes within fit_tolerance_mm while
+    retaining trim wires and holes, with extended BREP checks; then fits full
+    circular cylinder bands within fit_tolerance_mm and surface_tolerance_mm;
+    reports restored/skipped candidates. Layered extruded profiles also recover
+    partial circular arcs of at least 45 degrees, preserving straight sections.
+    Local arc bands also work on crossed/oblique parts with verified support and
+    neighbouring-plane trims. Automatically rescans residual faceting after each
+    pass; reports automatic_passes, local_cylinders, analytic_seed_completion,
+    faceting_check and reconstruction_status. Unsupported freeform geometry and
+    short ambiguous chains may remain; solid validity is not completeness.
+    Checks volume change (percent) and bounding-box change; these are not a
+    global surface-deviation guarantee. Requires Undo;
+    transactional, cancellable at safe points, does not save. If job_id is returned,
+    poll get_assembly_job; long conversions can use start_assembly_operation.
+    """
+    from .assembly.bridge import call
+    return call(get_freecad_connection(), "convert_mesh_to_brep", dict(
+        doc_name=doc_name, mesh_object=mesh_object, source_file=source_file, name=name,
+        tolerance_mm=tolerance_mm, repair=repair, refine=refine,
+        max_volume_change_percent=max_volume_change_percent, recognize_surfaces=recognize_surfaces,
+        fit_tolerance_mm=fit_tolerance_mm, surface_tolerance_mm=surface_tolerance_mm))
+
+
 def _validate_host(value: str) -> str:
     """Validate that *value* is a valid IP address or hostname.
 
